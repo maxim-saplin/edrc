@@ -43,6 +43,26 @@ class MainActivity : FlutterActivity() {
                         result.error("API_ERROR", "BatteryUsageStats API requires Android P (API 28) or higher", null)
                     }
                 }
+                "getBatteryLevelHistory" -> {
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                        if (!hasUsageStatsPermission()) {
+                            // Request permission
+                            requestUsageStatsPermission()
+                            result.error("PERMISSION_DENIED", 
+                                "Usage stats permission required. Please grant permission and try again.", null)
+                            return@setMethodCallHandler
+                        }
+                        
+                        try {
+                            val history = getBatteryLevelHistory()
+                            result.success(history)
+                        } catch (e: Exception) {
+                            result.error("HISTORY_ERROR", "Error getting battery history: ${e.message}", null)
+                        }
+                    } else {
+                        result.error("API_ERROR", "Battery history requires Android P (API 28) or higher", null)
+                    }
+                }
                 else -> result.notImplemented()
             }
         }
@@ -190,6 +210,69 @@ class MainActivity : FlutterActivity() {
                 // Skip this entry if package can't be resolved
                 continue
             }
+        }
+    }
+
+    @RequiresApi(Build.VERSION_CODES.P)
+    private fun getBatteryLevelHistory(): List<Map<String, Any>> {
+        val result = mutableListOf<Map<String, Any>>()
+        
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            try {
+                // Using reflection to access Android S APIs
+                val batteryStatsManagerClass = Class.forName("android.os.BatteryUsageStatsManager")
+                val batteryUsageStatsManager = getSystemService(batteryStatsManagerClass)
+                
+                val queryBuilderClass = Class.forName("android.os.BatteryUsageStatsQuery\$Builder")
+                val queryBuilder = queryBuilderClass.getDeclaredConstructor().newInstance()
+                
+                // Set to get data for past 24 hours
+                val setMaxStatsAgeMs = queryBuilderClass.getMethod("setMaxStatsAgeMs", Long::class.java)
+                setMaxStatsAgeMs.invoke(queryBuilder, TimeUnit.HOURS.toMillis(24))
+                
+                // Include battery discharge data (history)
+                val includeBatteryDischargeData = queryBuilderClass.getMethod("includeBatteryDischargeData")
+                includeBatteryDischargeData.invoke(queryBuilder)
+                
+                val build = queryBuilderClass.getMethod("build")
+                val query = build.invoke(queryBuilder)
+                
+                val getBatteryUsageStats = batteryStatsManagerClass.getMethod("getBatteryUsageStats", 
+                    Class.forName("android.os.BatteryUsageStatsQuery"))
+                val batteryUsageStats = getBatteryUsageStats.invoke(batteryUsageStatsManager!!, query)
+                
+                // Get battery history data
+                val getBatteryHistory = batteryUsageStats?.javaClass?.getMethod("getBatteryHistory")
+                val batteryHistory = getBatteryHistory?.invoke(batteryUsageStats) as? List<*> ?: listOf<Any>()
+                
+                for (historyEntry in batteryHistory) {
+                    try {
+                        val entryClass = historyEntry?.javaClass
+                        val getTimestampMs = entryClass?.getMethod("getTimestampMs")
+                        val timestamp = getTimestampMs?.invoke(historyEntry) as? Long ?: continue
+                        
+                        val getBatteryLevel = entryClass?.getMethod("getBatteryLevel")
+                        val batteryLevel = getBatteryLevel?.invoke(historyEntry) as? Int ?: continue
+                        
+                        result.add(mapOf(
+                            "timestamp" to timestamp,
+                            "batteryLevel" to batteryLevel
+                        ))
+                    } catch (e: Exception) {
+                        continue
+                    }
+                }
+                
+                // Return empty list if we can't get real data
+                return result.sortedBy { it["timestamp"] as Long }
+                
+            } catch (e: Exception) {
+                // Return empty list instead of mock data
+                return emptyList()
+            }
+        } else {
+            // Return empty list for older devices instead of mock data
+            return emptyList()
         }
     }
 }
