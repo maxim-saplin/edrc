@@ -1,420 +1,500 @@
-// main.dart
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:fl_chart/fl_chart.dart';
 import 'package:intl/intl.dart';
 
 void main() {
-  runApp(const MyApp());
+  WidgetsFlutterBinding.ensureInitialized();
+  runApp(const EnduranceApp());
 }
 
-class MyApp extends StatelessWidget {
-  const MyApp({super.key});
+class EnduranceApp extends StatelessWidget {
+  const EnduranceApp({super.key});
 
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'Battery Stats PoC',
-      theme: ThemeData(primarySwatch: Colors.blue, useMaterial3: true),
-      home: const BatteryStatsPage(),
+      title: 'Battery Endurance',
+      debugShowCheckedModeBanner: false,
+      theme: ThemeData(
+        useMaterial3: true,
+        brightness: Brightness.light,
+        scaffoldBackgroundColor: Colors.white,
+        colorScheme: const ColorScheme.light(
+          primary: Colors.black,
+          onPrimary: Colors.white,
+          surface: Colors.white,
+          onSurface: Colors.black,
+        ),
+        textTheme: const TextTheme(
+          headlineLarge: TextStyle(
+            fontSize: 56,
+            fontWeight: FontWeight.w300,
+            letterSpacing: -2,
+            color: Colors.black,
+          ),
+          titleSmall: TextStyle(
+            fontSize: 12,
+            letterSpacing: 2,
+            fontWeight: FontWeight.w600,
+            color: Colors.black54,
+          ),
+          bodyMedium: TextStyle(fontSize: 14, color: Colors.black54),
+        ),
+      ),
+      home: const EndurancePage(),
     );
   }
 }
 
-class BatteryStatsPage extends StatefulWidget {
-  const BatteryStatsPage({super.key});
+class EndurancePage extends StatefulWidget {
+  const EndurancePage({super.key});
 
   @override
-  State<BatteryStatsPage> createState() => _BatteryStatsPageState();
+  State<EndurancePage> createState() => _EndurancePageState();
 }
 
-class _BatteryStatsPageState extends State<BatteryStatsPage>
-    with SingleTickerProviderStateMixin {
-  static const platform = MethodChannel('com.example.battery_stats/battery');
-  List<Map<String, dynamic>> _batteryStats = [];
-  List<Map<String, dynamic>> _batteryHistory = [];
-  bool _isLoading = false;
-  String _errorMessage = '';
-  late TabController _tabController;
+class _EndurancePageState extends State<EndurancePage>
+    with WidgetsBindingObserver {
+  static const _channel = MethodChannel('com.example.battery_stats/battery');
+  static const _events = EventChannel('com.example.battery_stats/battery/events');
+
+  Map<String, dynamic> _setup = {};
+  Map<String, dynamic> _snapshot = {};
+  List<Map<String, dynamic>> _days = [];
+  Map<String, dynamic> _week = {};
+  String _todayKey = '';
+  int _selectedDayIndex = 6;
+  bool _loading = true;
+  StreamSubscription<dynamic>? _batterySub;
+  Timer? _snapshotPoll;
 
   @override
   void initState() {
     super.initState();
-    _tabController = TabController(length: 2, vsync: this);
-    _fetchBatteryStats();
-    _fetchBatteryHistory();
+    WidgetsBinding.instance.addObserver(this);
+    _batterySub = _events.receiveBroadcastStream().listen(_onBatteryEvent);
+    _snapshotPoll = Timer.periodic(const Duration(seconds: 2), (_) {
+      _pollSnapshot();
+    });
+    _refresh();
   }
 
   @override
   void dispose() {
-    _tabController.dispose();
+    _snapshotPoll?.cancel();
+    _batterySub?.cancel();
+    WidgetsBinding.instance.removeObserver(this);
     super.dispose();
   }
 
-  Future<void> _fetchBatteryStats() async {
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      _refresh();
+    }
+  }
+
+  void _onBatteryEvent(dynamic event) {
+    if (!mounted || event is! Map) return;
     setState(() {
-      _isLoading = true;
-      _errorMessage = '';
+      _snapshot = Map<String, dynamic>.from(event);
     });
+  }
 
+  Future<void> _pollSnapshot() async {
+    if (!mounted || _loading) return;
     try {
-      final result = await platform.invokeMethod('getBatteryUsageStats');
-
-      // Convert the raw result into the proper type
-      final List<Map<String, dynamic>> batteryStats =
-          (result as List).map((item) {
-            // Cast each map item with proper types
-            return Map<String, dynamic>.from(item as Map);
-          }).toList();
-
-      setState(() {
-        _batteryStats = batteryStats;
-        _isLoading = false;
-      });
-    } on PlatformException catch (e) {
-      setState(() {
-        _isLoading = false;
-        _errorMessage = 'Error: ${e.message}';
-      });
-      debugPrint('Error: $e');
-      debugPrintStack();
-    } catch (e) {
-      setState(() {
-        _isLoading = false;
-        _errorMessage = 'Unexpected error: $e';
-      });
-      debugPrint('Error: $e');
-      debugPrintStack();
+      final snapshot =
+          Map<String, dynamic>.from(await _channel.invokeMethod('getSnapshot'));
+      if (!mounted) return;
+      setState(() => _snapshot = snapshot);
+    } on PlatformException {
+      // Keep the last known snapshot.
     }
   }
 
-  Future<void> _fetchBatteryHistory() async {
+  Future<void> _refresh() async {
+    setState(() => _loading = true);
     try {
-      final result = await platform.invokeMethod('getBatteryLevelHistory');
+      final setup =
+          Map<String, dynamic>.from(await _channel.invokeMethod('getSetupStatus'));
+      final metrics =
+          Map<String, dynamic>.from(await _channel.invokeMethod('getDayMetrics'));
 
-      // Convert the raw result into the proper type
-      final List<Map<String, dynamic>> batteryHistory =
-          (result as List).map((item) {
-            return Map<String, dynamic>.from(item as Map);
-          }).toList();
+      if (setup['ready'] == true && setup['collectorRunning'] != true) {
+        await _channel.invokeMethod('startCollector');
+      }
 
+      final setupAfter =
+          Map<String, dynamic>.from(await _channel.invokeMethod('getSetupStatus'));
+      final snapshotAfter =
+          Map<String, dynamic>.from(await _channel.invokeMethod('getSnapshot'));
+
+      final daysRaw = metrics['days'] as List<dynamic>? ?? [];
+      final days = daysRaw
+          .map((d) => Map<String, dynamic>.from(d as Map))
+          .toList();
+
+      if (!mounted) return;
       setState(() {
-        _batteryHistory = batteryHistory;
+        _setup = setupAfter;
+        _snapshot = snapshotAfter;
+        _days = days;
+        _week = Map<String, dynamic>.from(metrics['week'] as Map? ?? {});
+        _todayKey = metrics['todayKey'] as String? ?? '';
+        if (_days.isEmpty) {
+          _selectedDayIndex = 0;
+        } else if (_selectedDayIndex >= days.length) {
+          _selectedDayIndex = days.length - 1;
+        }
+        _loading = false;
       });
     } on PlatformException catch (e) {
-      debugPrint('Error fetching battery history: ${e.message}');
-    } catch (e) {
-      debugPrint('Unexpected error fetching battery history: $e');
+      if (!mounted) return;
+      setState(() => _loading = false);
+      debugPrint('Platform error: ${e.message}');
     }
   }
 
-  Future<void> _refreshData() async {
-    await Future.wait([_fetchBatteryStats(), _fetchBatteryHistory()]);
+  Future<void> _requestSetup(String type) async {
+    await _channel.invokeMethod('requestSetup', {'type': type});
+    if (type == 'autostart_ack') {
+      await _refresh();
+    }
+  }
+
+  Map<String, dynamic>? get _selectedDay {
+    if (_days.isEmpty || _selectedDayIndex < 0 || _selectedDayIndex >= _days.length) {
+      return null;
+    }
+    return _days[_selectedDayIndex];
+  }
+
+  String _formatHours(double? hours) {
+    if (hours == null) return '—';
+    return '${hours.toStringAsFixed(1)} h';
+  }
+
+  String _formatSubtitle(Map<String, dynamic>? metrics) {
+    if (metrics == null) return 'no data';
+    final screenOn = (metrics['screenOnHours'] as num?)?.toDouble() ?? 0;
+    final pct = (metrics['screenOnPercentDrop'] as num?)?.toDouble() ?? 0;
+    final steps = metrics['stepCount'] as int? ?? 0;
+    if (steps == 0) return 'no steps yet';
+    return '${screenOn.toStringAsFixed(1)} h on · ${pct.toStringAsFixed(0)}% · $steps steps';
+  }
+
+  String _dayLabel(String dateKey) {
+    try {
+      final date = DateFormat('yyyy-MM-dd').parse(dateKey);
+      return DateFormat('EEE').format(date).substring(0, 1).toUpperCase();
+    } catch (_) {
+      return '?';
+    }
+  }
+
+  String _selectedTitle() {
+    final day = _selectedDay;
+    if (day == null) return 'TODAY';
+    final key = day['dateKey'] as String? ?? '';
+    if (key == _todayKey) return 'TODAY';
+    try {
+      return DateFormat('EEE d MMM').format(DateFormat('yyyy-MM-dd').parse(key)).toUpperCase();
+    } catch (_) {
+      return key.toUpperCase();
+    }
   }
 
   @override
   Widget build(BuildContext context) {
+    final ready = _setup['ready'] == true;
+    final selected = _selectedDay;
+    final selectedSot = selected != null && selected['hasEnoughData'] == true
+        ? (selected['sotHoursPer100'] as num?)?.toDouble()
+        : null;
+    final weekSot = _week['hasEnoughData'] == true
+        ? (_week['sotHoursPer100'] as num?)?.toDouble()
+        : null;
+
+    final level = _snapshot['level'] as int? ?? -1;
+    final plugged = _snapshot['plugged'] == true;
+    final charging = _snapshot['charging'] == true;
+    final collecting = _setup['collectorRunning'] == true;
+    final samplingPaused = ready && !collecting;
+
     return Scaffold(
-      appBar: AppBar(
-        title: const Text('Battery Usage Stats'),
-        bottom: TabBar(
-          controller: _tabController,
-          tabs: const [
-            Tab(text: 'App Usage', icon: Icon(Icons.apps)),
-            Tab(text: 'Battery History', icon: Icon(Icons.battery_full)),
-          ],
-        ),
-      ),
       body: SafeArea(
-        child: Padding(
-          padding: EdgeInsets.only(
-            bottom: MediaQuery.of(context).padding.bottom,
-          ),
-          child: TabBarView(
-            controller: _tabController,
-            children: [
-              // First tab - App usage stats
-              _isLoading
-                  ? const Center(child: CircularProgressIndicator())
-                  : _errorMessage.isNotEmpty
-                  ? Center(
-                    child: Padding(
-                      padding: const EdgeInsets.all(16.0),
+        child: _loading
+            ? const Center(child: CircularProgressIndicator(color: Colors.black))
+            : Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(24, 16, 24, 0),
+                    child: Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        Text(
+                          level >= 0 ? '$level%' : '—',
+                          style: Theme.of(context).textTheme.titleSmall,
+                        ),
+                        Text(
+                          (plugged || charging) ? 'CHARGING' : 'UNPLUGGED',
+                          style: Theme.of(context).textTheme.titleSmall,
+                        ),
+                      ],
+                    ),
+                  ),
+                  if (!ready) ...[
+                    const SizedBox(height: 24),
+                    Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 24),
+                      child: _SetupPanel(
+                        setup: _setup,
+                        onRequest: _requestSetup,
+                        onRefresh: _refresh,
+                      ),
+                    ),
+                  ] else ...[
+                    const Spacer(flex: 2),
+                    Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 24),
                       child: Column(
-                        mainAxisSize: MainAxisSize.min,
+                        crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
+                          Text(_selectedTitle(), style: Theme.of(context).textTheme.titleSmall),
+                          const SizedBox(height: 8),
                           Text(
-                            _errorMessage,
-                            style: const TextStyle(color: Colors.red),
-                            textAlign: TextAlign.center,
+                            _formatHours(selectedSot),
+                            style: Theme.of(context).textTheme.headlineLarge,
                           ),
-                          const SizedBox(height: 16),
-                          ElevatedButton(
-                            onPressed: _fetchBatteryStats,
-                            child: const Text('Try Again'),
+                          const SizedBox(height: 8),
+                          Text(
+                            _formatSubtitle(selected),
+                            style: Theme.of(context).textTheme.bodyMedium,
+                          ),
+                          if (selected != null && selected['hasEnoughData'] != true)
+                            Padding(
+                              padding: const EdgeInsets.only(top: 4),
+                              child: Text(
+                                selectedSot == null ? 'need ≥3% screen-on drain' : '',
+                                style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                                      fontSize: 12,
+                                      color: Colors.black38,
+                                    ),
+                              ),
+                            ),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(height: 40),
+                    Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 24),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text('7 DAYS', style: Theme.of(context).textTheme.titleSmall),
+                          const SizedBox(height: 8),
+                          Text(
+                            _formatHours(weekSot),
+                            style: Theme.of(context).textTheme.headlineLarge?.copyWith(fontSize: 40),
+                          ),
+                          const SizedBox(height: 8),
+                          Text(
+                            _formatSubtitle(_week),
+                            style: Theme.of(context).textTheme.bodyMedium,
                           ),
                         ],
                       ),
                     ),
-                  )
-                  : _batteryStats.isEmpty
-                  ? const Center(child: Text('No battery stats available'))
-                  : RefreshIndicator(
-                    onRefresh: _refreshData,
-                    child: ListView.builder(
-                      itemCount: _batteryStats.length,
-                      itemBuilder: (context, index) {
-                        final stat = _batteryStats[index];
-                        return BatteryStatCard(stat: stat);
-                      },
-                    ),
-                  ),
-
-              // Second tab - Battery level history graph
-              RefreshIndicator(
-                onRefresh: _refreshData,
-                child:
-                    _batteryHistory.isEmpty
-                        ? const Center(
-                          child: Text('No battery history available'),
-                        )
-                        : Padding(
-                          padding: const EdgeInsets.all(16.0),
-                          child: BatteryHistoryChart(
-                            batteryHistory: _batteryHistory,
+                    const Spacer(flex: 3),
+                    Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 8),
+                      child: Column(
+                        children: [
+                          Text(
+                            [
+                              if (collecting) 'collecting',
+                              if (samplingPaused) 'sampling paused',
+                              if (_setup['batteryUnrestricted'] == true) 'unrestricted',
+                              if (_setup['notificationsGranted'] == true) 'notifications',
+                              if (_setup['autostartAcknowledged'] == true) 'autostart',
+                            ].where((s) => s.isNotEmpty).join(' · '),
+                            style: Theme.of(context).textTheme.bodyMedium?.copyWith(fontSize: 12),
+                            textAlign: TextAlign.center,
                           ),
-                        ),
+                          if (collecting)
+                            TextButton(
+                              onPressed: () => _requestSetup('notification_channel'),
+                              child: const Text(
+                                'Hide sampling notification',
+                                style: TextStyle(fontSize: 12, color: Colors.black54),
+                              ),
+                            ),
+                        ],
+                      ),
+                    ),
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+                      child: Row(
+                        children: List.generate(_days.length, (index) {
+                          final day = _days[index];
+                          final key = day['dateKey'] as String? ?? '';
+                          final hasData = (day['stepCount'] as int? ?? 0) > 0;
+                          final selectedNow = index == _selectedDayIndex;
+                          return Expanded(
+                            child: GestureDetector(
+                              onTap: () => setState(() => _selectedDayIndex = index),
+                              child: Container(
+                                margin: const EdgeInsets.symmetric(horizontal: 2),
+                                padding: const EdgeInsets.symmetric(vertical: 12),
+                                decoration: BoxDecoration(
+                                  border: Border(
+                                    top: BorderSide(
+                                      color: selectedNow ? Colors.black : Colors.black12,
+                                      width: selectedNow ? 2 : 1,
+                                    ),
+                                  ),
+                                ),
+                                child: Column(
+                                  children: [
+                                    Text(
+                                      _dayLabel(key),
+                                      style: TextStyle(
+                                        fontSize: 12,
+                                        fontWeight: selectedNow ? FontWeight.w700 : FontWeight.w400,
+                                        color: hasData ? Colors.black : Colors.black26,
+                                      ),
+                                    ),
+                                    if (hasData)
+                                      Container(
+                                        margin: const EdgeInsets.only(top: 6),
+                                        width: 4,
+                                        height: 4,
+                                        decoration: const BoxDecoration(
+                                          color: Colors.black,
+                                          shape: BoxShape.circle,
+                                        ),
+                                      ),
+                                  ],
+                                ),
+                              ),
+                            ),
+                          );
+                        }),
+                      ),
+                    ),
+                  ],
+                ],
               ),
-            ],
-          ),
-        ),
       ),
     );
   }
 }
 
-class BatteryHistoryChart extends StatelessWidget {
-  final List<Map<String, dynamic>> batteryHistory;
+class _SetupPanel extends StatelessWidget {
+  const _SetupPanel({
+    required this.setup,
+    required this.onRequest,
+    required this.onRefresh,
+  });
 
-  const BatteryHistoryChart({super.key, required this.batteryHistory});
+  final Map<String, dynamic> setup;
+  final Future<void> Function(String type) onRequest;
+  final Future<void> Function() onRefresh;
 
   @override
   Widget build(BuildContext context) {
-    // Sort the battery history with most recent timestamps at the end
-    final sortedHistory = List<Map<String, dynamic>>.from(
-      batteryHistory,
-    )..sort((a, b) => (a['timestamp'] as int).compareTo(b['timestamp'] as int));
+    final notifications = setup['notificationsGranted'] == true;
+    final battery = setup['batteryUnrestricted'] == true;
 
     return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        const SizedBox(height: 20),
-        Text(
-          'Battery Level Past 24 Hours',
-          style: Theme.of(context).textTheme.titleLarge,
+        Text('SETUP', style: Theme.of(context).textTheme.titleSmall),
+        const SizedBox(height: 16),
+        _SetupRow(
+          label: 'Notifications',
+          done: notifications,
+          onTap: () => onRequest('notifications'),
         ),
-        const SizedBox(height: 30),
-        Expanded(
-          child: LineChart(
-            LineChartData(
-              gridData: const FlGridData(show: true),
-              titlesData: FlTitlesData(
-                bottomTitles: AxisTitles(
-                  sideTitles: SideTitles(
-                    showTitles: true,
-                    getTitlesWidget: (value, meta) {
-                      if (value.toInt() % (sortedHistory.length ~/ 4) != 0) {
-                        return const SizedBox.shrink();
-                      }
-
-                      final index = value.toInt();
-                      if (index >= 0 && index < sortedHistory.length) {
-                        final timestamp =
-                            sortedHistory[index]['timestamp'] as int;
-                        final date = DateTime.fromMillisecondsSinceEpoch(
-                          timestamp,
-                        );
-                        return Padding(
-                          padding: const EdgeInsets.only(top: 8.0),
-                          child: Text(
-                            DateFormat('HH:mm').format(date),
-                            style: const TextStyle(fontSize: 10),
-                          ),
-                        );
-                      }
-                      return const SizedBox.shrink();
-                    },
-                    reservedSize: 30,
-                  ),
-                ),
-                leftTitles: AxisTitles(
-                  sideTitles: SideTitles(
-                    showTitles: true,
-                    getTitlesWidget: (value, meta) {
-                      if (value % 20 != 0) return const SizedBox.shrink();
-                      return Padding(
-                        padding: const EdgeInsets.only(right: 8.0),
-                        child: Text('${value.toInt()}%'),
-                      );
-                    },
-                    reservedSize: 35,
-                  ),
-                ),
-                topTitles: const AxisTitles(
-                  sideTitles: SideTitles(showTitles: false),
-                ),
-                rightTitles: const AxisTitles(
-                  sideTitles: SideTitles(showTitles: false),
-                ),
-              ),
-              borderData: FlBorderData(show: true),
-              minX: 0,
-              maxX: (sortedHistory.length - 1).toDouble(),
-              minY: 0,
-              maxY: 100,
-              lineBarsData: [
-                LineChartBarData(
-                  spots: List.generate(
-                    sortedHistory.length,
-                    (index) => FlSpot(
-                      index.toDouble(),
-                      (sortedHistory[index]['batteryLevel'] as int).toDouble(),
-                    ),
-                  ),
-                  isCurved: true,
-                  color: Colors.blue,
-                  barWidth: 3,
-                  isStrokeCapRound: true,
-                  dotData: const FlDotData(show: false),
-                  belowBarData: BarAreaData(
-                    show: true,
-                    color: Colors.blue.withOpacity(0.2),
-                  ),
-                ),
-              ],
-              lineTouchData: LineTouchData(
-                touchTooltipData: LineTouchTooltipData(
-                  tooltipBgColor: Colors.blueAccent.withOpacity(0.8),
-                  getTooltipItems: (touchedSpots) {
-                    return touchedSpots.map((touchedSpot) {
-                      final index = touchedSpot.x.toInt();
-                      if (index >= 0 && index < sortedHistory.length) {
-                        final timestamp =
-                            sortedHistory[index]['timestamp'] as int;
-                        final date = DateTime.fromMillisecondsSinceEpoch(
-                          timestamp,
-                        );
-                        final level =
-                            sortedHistory[index]['batteryLevel'] as int;
-                        return LineTooltipItem(
-                          '${DateFormat('HH:mm').format(date)}\n$level%',
-                          const TextStyle(
-                            color: Colors.white,
-                            fontWeight: FontWeight.bold,
-                          ),
-                        );
-                      }
-                      return null;
-                    }).toList();
-                  },
-                ),
-              ),
-            ),
+        const SizedBox(height: 12),
+        _SetupRow(
+          label: 'Unrestricted battery',
+          done: battery,
+          onTap: () => onRequest('battery_optimization'),
+        ),
+        const SizedBox(height: 12),
+        _SetupRow(
+          label: 'Autostart (ColorOS)',
+          done: setup['autostartAcknowledged'] == true,
+          onTap: () => onRequest('autostart'),
+        ),
+        if (setup['autostartAcknowledged'] != true) ...[
+          const SizedBox(height: 4),
+          TextButton(
+            onPressed: () => onRequest('autostart_ack'),
+            child: const Text('I enabled autostart'),
           ),
+        ],
+        if (!battery) ...[
+          const SizedBox(height: 8),
+          TextButton(
+            onPressed: () => onRequest('battery_settings'),
+            child: const Text('Open app battery settings'),
+          ),
+        ],
+        const SizedBox(height: 24),
+        OutlinedButton(
+          onPressed: onRefresh,
+          child: const Text('Refresh'),
         ),
       ],
     );
   }
 }
 
-class BatteryStatCard extends StatelessWidget {
-  final Map<String, dynamic> stat;
+class _SetupRow extends StatelessWidget {
+  const _SetupRow({
+    required this.label,
+    required this.done,
+    required this.onTap,
+  });
 
-  const BatteryStatCard({super.key, required this.stat});
+  final String label;
+  final bool done;
+  final VoidCallback onTap;
 
   @override
   Widget build(BuildContext context) {
-    return Card(
-      margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-      child: Padding(
-        padding: const EdgeInsets.all(16.0),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              children: [
-                Container(
-                  width: 40,
-                  height: 40,
-                  decoration: BoxDecoration(
-                    color: Colors.blue.shade100,
-                    borderRadius: BorderRadius.circular(8),
-                  ),
-                  child: Icon(Icons.battery_full, color: Colors.blue.shade800),
-                ),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: Text(
-                    stat['packageName'] ?? 'Unknown App',
-                    style: const TextStyle(
-                      fontWeight: FontWeight.bold,
-                      fontSize: 16,
-                    ),
-                  ),
-                ),
-              ],
-            ),
-            const Divider(),
-            _buildStatRow(
-              'Power Usage',
-              '${stat['powerUsagePercent'] ?? 'N/A'}%',
-            ),
-            _buildStatRow(
-              'Foreground Usage',
-              _formatDuration(stat['foregroundUsageTimeMs']),
-            ),
-            _buildStatRow(
-              'Background Usage',
-              _formatDuration(stat['backgroundUsageTimeMs']),
-            ),
-            if (stat['consumedPowerMah'] != null)
-              _buildStatRow(
-                'Battery Consumed',
-                '${stat['consumedPowerMah']} mAh',
-              ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _buildStatRow(String label, String value) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 4),
+    return InkWell(
+      onTap: done ? null : onTap,
       child: Row(
-        mainAxisAlignment: MainAxisAlignment.spaceBetween,
         children: [
-          Text(label),
-          Text(value, style: const TextStyle(fontWeight: FontWeight.w500)),
+          Icon(
+            done ? Icons.check : Icons.circle_outlined,
+            size: 18,
+            color: done ? Colors.black : Colors.black38,
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Text(
+              label,
+              style: TextStyle(
+                color: done ? Colors.black : Colors.black87,
+                decoration: done ? TextDecoration.lineThrough : null,
+              ),
+            ),
+          ),
+          if (!done)
+            const Text(
+              'Grant',
+              style: TextStyle(fontSize: 12, color: Colors.black54),
+            ),
         ],
       ),
     );
-  }
-
-  String _formatDuration(dynamic milliseconds) {
-    if (milliseconds == null) return 'N/A';
-
-    final ms =
-        milliseconds is int
-            ? milliseconds
-            : int.tryParse(milliseconds.toString()) ?? 0;
-    final minutes = ms ~/ 60000;
-    final hours = minutes ~/ 60;
-    final mins = minutes % 60;
-
-    if (hours > 0) {
-      return '$hours h $mins min';
-    } else {
-      return '$mins min';
-    }
   }
 }
