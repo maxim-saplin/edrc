@@ -15,7 +15,7 @@ class EnduranceApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'Battery Endurance',
+      title: 'edrc',
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
         useMaterial3: true,
@@ -57,34 +57,37 @@ class EndurancePage extends StatefulWidget {
 
 class _EndurancePageState extends State<EndurancePage>
     with WidgetsBindingObserver {
-  static const _channel = MethodChannel('com.example.battery_stats/battery');
-  static const _events = EventChannel('com.example.battery_stats/battery/events');
+  static const _channel = MethodChannel('com.saplin.edrc/battery');
+  static const _events = EventChannel('com.saplin.edrc/battery/events');
+  static const _shizukuEvents =
+      EventChannel('com.saplin.edrc/battery/shizuku');
 
   Map<String, dynamic> _setup = {};
   Map<String, dynamic> _snapshot = {};
-  List<Map<String, dynamic>> _days = [];
-  Map<String, dynamic> _week = {};
-  String _todayKey = '';
-  int _selectedDayIndex = 6;
+  Map<String, dynamic>? _cycle;
+  List<Map<String, dynamic>> _past = [];
+  List<Map<String, dynamic>> _intervals = [];
+  int? _updatedAtMs;
+  bool _idleMode = false;
   bool _loading = true;
+  String? _error;
+  int _refreshGen = 0;
   StreamSubscription<dynamic>? _batterySub;
-  Timer? _snapshotPoll;
+  StreamSubscription<dynamic>? _shizukuSub;
 
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     _batterySub = _events.receiveBroadcastStream().listen(_onBatteryEvent);
-    _snapshotPoll = Timer.periodic(const Duration(seconds: 2), (_) {
-      _pollSnapshot();
-    });
+    _shizukuSub = _shizukuEvents.receiveBroadcastStream().listen(_onShizukuStatus);
     _refresh();
   }
 
   @override
   void dispose() {
-    _snapshotPoll?.cancel();
     _batterySub?.cancel();
+    _shizukuSub?.cancel();
     WidgetsBinding.instance.removeObserver(this);
     super.dispose();
   }
@@ -92,84 +95,84 @@ class _EndurancePageState extends State<EndurancePage>
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
-      _refresh();
+      _refresh(silent: true);
     }
   }
 
   void _onBatteryEvent(dynamic event) {
     if (!mounted || event is! Map) return;
-    setState(() {
-      _snapshot = Map<String, dynamic>.from(event);
-    });
+    setState(() => _snapshot = Map<String, dynamic>.from(event));
   }
 
-  Future<void> _pollSnapshot() async {
-    if (!mounted || _loading) return;
-    try {
-      final snapshot =
-          Map<String, dynamic>.from(await _channel.invokeMethod('getSnapshot'));
-      if (!mounted) return;
-      setState(() => _snapshot = snapshot);
-    } on PlatformException {
-      // Keep the last known snapshot.
+  void _onShizukuStatus(dynamic event) {
+    if (!mounted || event is! Map) return;
+    final setup = Map<String, dynamic>.from(event);
+    final becameReady = setup['ready'] == true && _setup['ready'] != true;
+    setState(() => _setup = setup);
+    if (becameReady) {
+      _refresh();
     }
   }
 
-  Future<void> _refresh() async {
-    setState(() => _loading = true);
+  Future<void> _refresh({bool force = false, bool silent = false}) async {
+    final gen = ++_refreshGen;
+    if (!silent) {
+      setState(() {
+        _loading = true;
+        _error = null;
+      });
+    }
     try {
       final setup =
           Map<String, dynamic>.from(await _channel.invokeMethod('getSetupStatus'));
-      final metrics =
-          Map<String, dynamic>.from(await _channel.invokeMethod('getDayMetrics'));
-
-      if (setup['ready'] == true && setup['collectorRunning'] != true) {
-        await _channel.invokeMethod('startCollector');
-      }
-
-      final setupAfter =
-          Map<String, dynamic>.from(await _channel.invokeMethod('getSetupStatus'));
-      final snapshotAfter =
+      final snapshot =
           Map<String, dynamic>.from(await _channel.invokeMethod('getSnapshot'));
 
-      final daysRaw = metrics['days'] as List<dynamic>? ?? [];
-      final days = daysRaw
-          .map((d) => Map<String, dynamic>.from(d as Map))
-          .toList();
+      Map<String, dynamic>? cycle = _cycle;
+      var past = _past;
+      var intervals = _intervals;
+      int? updatedAtMs = _updatedAtMs;
 
-      if (!mounted) return;
+      if (setup['ready'] == true) {
+        final metrics = Map<String, dynamic>.from(
+          await _channel.invokeMethod('getMetrics', {'force': force}),
+        );
+        cycle = _asMap(metrics['cycle']);
+        updatedAtMs = (metrics['updatedAtMs'] as num?)?.toInt();
+        past = (metrics['past'] as List<dynamic>? ?? [])
+            .map((d) => Map<String, dynamic>.from(d as Map))
+            .toList();
+        intervals = (metrics['intervals'] as List<dynamic>? ?? [])
+            .map((d) => Map<String, dynamic>.from(d as Map))
+            .toList();
+      }
+
+      if (!mounted || gen != _refreshGen) return;
       setState(() {
-        _setup = setupAfter;
-        _snapshot = snapshotAfter;
-        _days = days;
-        _week = Map<String, dynamic>.from(metrics['week'] as Map? ?? {});
-        _todayKey = metrics['todayKey'] as String? ?? '';
-        if (_days.isEmpty) {
-          _selectedDayIndex = 0;
-        } else if (_selectedDayIndex >= days.length) {
-          _selectedDayIndex = days.length - 1;
-        }
+        _setup = setup;
+        _snapshot = snapshot;
+        _cycle = cycle;
+        _past = past;
+        _intervals = intervals;
+        _updatedAtMs = updatedAtMs;
         _loading = false;
       });
-    } on PlatformException catch (e) {
-      if (!mounted) return;
-      setState(() => _loading = false);
-      debugPrint('Platform error: ${e.message}');
+    } catch (e) {
+      if (!mounted || gen != _refreshGen) return;
+      setState(() {
+        _loading = false;
+        _error = e is PlatformException ? (e.message ?? e.code) : e.toString();
+      });
     }
+  }
+
+  Map<String, dynamic>? _asMap(dynamic value) {
+    if (value is Map) return Map<String, dynamic>.from(value);
+    return null;
   }
 
   Future<void> _requestSetup(String type) async {
     await _channel.invokeMethod('requestSetup', {'type': type});
-    if (type == 'autostart_ack') {
-      await _refresh();
-    }
-  }
-
-  Map<String, dynamic>? get _selectedDay {
-    if (_days.isEmpty || _selectedDayIndex < 0 || _selectedDayIndex >= _days.length) {
-      return null;
-    }
-    return _days[_selectedDayIndex];
   }
 
   String _formatHours(double? hours) {
@@ -177,70 +180,84 @@ class _EndurancePageState extends State<EndurancePage>
     return '${hours.toStringAsFixed(1)} h';
   }
 
-  String _formatSubtitle(Map<String, dynamic>? metrics) {
-    if (metrics == null) return 'no data';
-    final screenOn = (metrics['screenOnHours'] as num?)?.toDouble() ?? 0;
-    final mah = (metrics['drainMah'] as num?)?.toDouble() ?? 0;
-    final steps = metrics['stepCount'] as int? ?? 0;
-    if (steps == 0) return 'no µAh drain steps yet';
-    return '${screenOn.toStringAsFixed(1)} h on · ${mah.toStringAsFixed(0)} mAh · $steps steps';
+  DateTime? _parseClock(String? raw) {
+    if (raw == null || raw.isEmpty) return null;
+    try {
+      return DateFormat('yyyy-MM-dd-HH-mm-ss').parse(raw);
+    } catch (_) {
+      return null;
+    }
   }
 
-  String _coverageNote(Map<String, dynamic>? metrics) {
+  String _sincePhrase(String? raw) {
+    final dt = _parseClock(raw);
+    if (dt == null) return '';
+    final now = DateTime.now();
+    final time = DateFormat('HH:mm').format(dt);
+    final today = DateTime(now.year, now.month, now.day);
+    final that = DateTime(dt.year, dt.month, dt.day);
+    final days = today.difference(that).inDays;
+    if (days == 0) return 'today $time';
+    if (days == 1) return 'yesterday $time';
+    return DateFormat('d MMM, HH:mm').format(dt);
+  }
+
+  String _dayPhrase(String? raw) {
+    final dt = _parseClock(raw);
+    if (dt == null) return '';
+    final now = DateTime.now();
+    final today = DateTime(now.year, now.month, now.day);
+    final that = DateTime(dt.year, dt.month, dt.day);
+    final days = today.difference(that).inDays;
+    if (days == 0) return 'today';
+    if (days == 1) return 'yesterday';
+    return DateFormat('EEE d MMM').format(dt);
+  }
+
+  String _formatTime(int? ms) {
+    if (ms == null || ms <= 0) return '';
+    return DateFormat('HH:mm').format(DateTime.fromMillisecondsSinceEpoch(ms));
+  }
+
+  String _onSinceLine(Map<String, dynamic>? metrics, {required bool idle}) {
     if (metrics == null) return '';
-    final gaps = metrics['gapCount'] as int? ?? 0;
-    final gapH = (metrics['droppedGapHours'] as num?)?.toDouble() ?? 0;
-    if (gaps <= 0) return '';
-    return 'log has $gaps hole${gaps == 1 ? '' : 's'} (${gapH.toStringAsFixed(1)} h not counted)';
+    final hours = idle
+        ? ((metrics['screenOffHours'] as num?)?.toDouble() ?? 0)
+        : ((metrics['screenOnHours'] as num?)?.toDouble() ?? 0);
+    final since = _sincePhrase(metrics['startClock'] as String?);
+    final kind = idle ? 'idle' : 'screen on';
+    final value = hours.toStringAsFixed(1);
+    final core = since.isEmpty ? '$value h $kind' : '$value h $kind since $since';
+    return '$core, on battery';
   }
 
-  String _lastSampleAge() {
-    final ts = (_snapshot['lastLogTimestampMs'] as num?)?.toInt() ?? 0;
-    if (ts <= 0) return '';
-    final age = DateTime.now().difference(DateTime.fromMillisecondsSinceEpoch(ts));
-    if (age.inMinutes < 2) return 'last sample just now';
-    if (age.inHours < 1) return 'last sample ${age.inMinutes} min ago';
-    if (age.inHours < 48) return 'last sample ${age.inHours} h ago';
-    return 'last sample ${age.inDays} d ago';
-  }
-
-  String _dayLabel(String dateKey) {
-    try {
-      final date = DateFormat('yyyy-MM-dd').parse(dateKey);
-      return DateFormat('EEE').format(date).substring(0, 1).toUpperCase();
-    } catch (_) {
-      return '?';
+  String _caption({required bool idle, required bool enough}) {
+    if (!enough) {
+      return idle ? 'Need more idle drain on battery' : 'Need more drain on battery';
     }
-  }
-
-  String _selectedTitle() {
-    final day = _selectedDay;
-    if (day == null) return 'TODAY';
-    final key = day['dateKey'] as String? ?? '';
-    if (key == _todayKey) return 'TODAY';
-    try {
-      return DateFormat('EEE d MMM').format(DateFormat('yyyy-MM-dd').parse(key)).toUpperCase();
-    } catch (_) {
-      return key.toUpperCase();
-    }
+    return idle ? 'idle per full charge' : 'screen on per full charge';
   }
 
   @override
   Widget build(BuildContext context) {
     final ready = _setup['ready'] == true;
-    final selected = _selectedDay;
-    final selectedSot = selected != null && selected['hasEnoughData'] == true
-        ? (selected['sotHoursPer100'] as num?)?.toDouble()
+    final cycleSot = _cycle != null && _cycle!['hasEnoughData'] == true
+        ? (_cycle!['sotHoursPer100'] as num?)?.toDouble()
         : null;
-    final weekSot = _week['hasEnoughData'] == true
-        ? (_week['sotHoursPer100'] as num?)?.toDouble()
+    final cycleIdle = _cycle != null && _cycle!['hasEnoughIdle'] == true
+        ? (_cycle!['idleHoursPer100'] as num?)?.toDouble()
         : null;
-
+    final headline = _idleMode ? cycleIdle : cycleSot;
+    final onSince = _onSinceLine(_cycle, idle: _idleMode);
+    final enough = headline != null;
+    final caption = _error ??
+        (_cycle == null
+            ? 'No batterystats yet'
+            : _caption(idle: _idleMode, enough: enough));
     final level = _snapshot['level'] as int? ?? -1;
     final plugged = _snapshot['plugged'] == true;
     final charging = _snapshot['charging'] == true;
-    final collecting = _setup['collectorRunning'] == true;
-    final samplingPaused = ready && !collecting;
+    final updated = _formatTime(_updatedAtMs);
 
     return Scaffold(
       body: SafeArea(
@@ -272,9 +289,20 @@ class _EndurancePageState extends State<EndurancePage>
                       child: _SetupPanel(
                         setup: _setup,
                         onRequest: _requestSetup,
-                        onRefresh: _refresh,
+                        onRefresh: () => _refresh(force: true),
                       ),
                     ),
+                    if (_error != null)
+                      Padding(
+                        padding: const EdgeInsets.fromLTRB(24, 16, 24, 0),
+                        child: Text(
+                          _error!,
+                          style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                                fontSize: 12,
+                                color: Colors.black54,
+                              ),
+                        ),
+                      ),
                   ] else ...[
                     const Spacer(flex: 2),
                     Padding(
@@ -282,149 +310,125 @@ class _EndurancePageState extends State<EndurancePage>
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
-                          Text(_selectedTitle(), style: Theme.of(context).textTheme.titleSmall),
-                          const SizedBox(height: 8),
-                          Text(
-                            _formatHours(selectedSot),
-                            style: Theme.of(context).textTheme.headlineLarge,
+                          GestureDetector(
+                            onTap: () => setState(() => _idleMode = !_idleMode),
+                            child: Text(
+                              _formatHours(headline),
+                              style: Theme.of(context).textTheme.headlineLarge,
+                            ),
                           ),
                           const SizedBox(height: 8),
-                          Text(
-                            _formatSubtitle(selected),
-                            style: Theme.of(context).textTheme.bodyMedium,
-                          ),
-                          if (selected != null && selected['hasEnoughData'] != true)
-                            Padding(
-                              padding: const EdgeInsets.only(top: 4),
-                              child: Text(
-                                selectedSot == null ? 'need ≥3% screen-on drain (µAh)' : '',
-                                style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                                      fontSize: 12,
-                                      color: Colors.black38,
-                                    ),
-                              ),
-                            ),
-                          if (_coverageNote(selected).isNotEmpty)
-                            Padding(
-                              padding: const EdgeInsets.only(top: 4),
-                              child: Text(
-                                _coverageNote(selected),
-                                style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                                      fontSize: 12,
-                                      color: Colors.black38,
-                                    ),
-                              ),
-                            ),
+                          Text(caption, style: Theme.of(context).textTheme.bodyMedium),
+                          if (onSince.isNotEmpty) ...[
+                            const SizedBox(height: 6),
+                            Text(onSince, style: Theme.of(context).textTheme.bodyMedium),
+                          ],
                         ],
                       ),
                     ),
-                    const SizedBox(height: 40),
-                    Padding(
-                      padding: const EdgeInsets.symmetric(horizontal: 24),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text('7 DAYS', style: Theme.of(context).textTheme.titleSmall),
-                          const SizedBox(height: 8),
-                          Text(
-                            _formatHours(weekSot),
-                            style: Theme.of(context).textTheme.headlineLarge?.copyWith(fontSize: 40),
-                          ),
-                          const SizedBox(height: 8),
-                          Text(
-                            _formatSubtitle(_week),
-                            style: Theme.of(context).textTheme.bodyMedium,
-                          ),
-                          if (_coverageNote(_week).isNotEmpty)
-                            Padding(
-                              padding: const EdgeInsets.only(top: 4),
-                              child: Text(
-                                _coverageNote(_week),
-                                style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                                      fontSize: 12,
-                                      color: Colors.black38,
-                                    ),
-                              ),
-                            ),
-                        ],
-                      ),
-                    ),
-                    const Spacer(flex: 3),
-                    Padding(
-                      padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 8),
-                      child: Column(
-                        children: [
-                          Text(
-                            [
-                              if (collecting) 'collecting',
-                              if (samplingPaused) 'sampling paused',
-                              if (_lastSampleAge().isNotEmpty) _lastSampleAge(),
-                              if (_setup['batteryUnrestricted'] == true) 'unrestricted',
-                              if (_setup['notificationsGranted'] == true) 'notifications',
-                              if (_setup['autostartAcknowledged'] == true) 'autostart',
-                            ].where((s) => s.isNotEmpty).join(' · '),
-                            style: Theme.of(context).textTheme.bodyMedium?.copyWith(fontSize: 12),
-                            textAlign: TextAlign.center,
-                          ),
-                          if (collecting)
-                            TextButton(
-                              onPressed: () => _requestSetup('notification_channel'),
-                              child: const Text(
-                                'Hide sampling notification',
-                                style: TextStyle(fontSize: 12, color: Colors.black54),
-                              ),
-                            ),
-                        ],
-                      ),
-                    ),
-                    Padding(
-                      padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
-                      child: Row(
-                        children: List.generate(_days.length, (index) {
-                          final day = _days[index];
-                          final key = day['dateKey'] as String? ?? '';
-                          final hasData = (day['stepCount'] as int? ?? 0) > 0;
-                          final selectedNow = index == _selectedDayIndex;
-                          return Expanded(
-                            child: GestureDetector(
-                              onTap: () => setState(() => _selectedDayIndex = index),
-                              child: Container(
-                                margin: const EdgeInsets.symmetric(horizontal: 2),
-                                padding: const EdgeInsets.symmetric(vertical: 12),
-                                decoration: BoxDecoration(
-                                  border: Border(
-                                    top: BorderSide(
-                                      color: selectedNow ? Colors.black : Colors.black12,
-                                      width: selectedNow ? 2 : 1,
-                                    ),
-                                  ),
-                                ),
-                                child: Column(
+                    if (_past.isNotEmpty) ...[
+                      const SizedBox(height: 40),
+                      Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 24),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text('PREVIOUS', style: Theme.of(context).textTheme.titleSmall),
+                            const SizedBox(height: 12),
+                            ..._past.take(5).map((item) {
+                              final sot = item['hasEnoughData'] == true
+                                  ? (item['sotHoursPer100'] as num?)?.toDouble()
+                                  : null;
+                              final day = _dayPhrase(item['startClock'] as String?);
+                              return Padding(
+                                padding: const EdgeInsets.only(bottom: 8),
+                                child: Row(
                                   children: [
-                                    Text(
-                                      _dayLabel(key),
-                                      style: TextStyle(
-                                        fontSize: 12,
-                                        fontWeight: selectedNow ? FontWeight.w700 : FontWeight.w400,
-                                        color: hasData ? Colors.black : Colors.black26,
+                                    Expanded(
+                                      child: Text(
+                                        day,
+                                        style: Theme.of(context).textTheme.bodyMedium,
                                       ),
                                     ),
-                                    if (hasData)
-                                      Container(
-                                        margin: const EdgeInsets.only(top: 6),
-                                        width: 4,
-                                        height: 4,
-                                        decoration: const BoxDecoration(
-                                          color: Colors.black,
-                                          shape: BoxShape.circle,
-                                        ),
-                                      ),
+                                    Text(
+                                      _formatHours(sot),
+                                      style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                                            color: Colors.black,
+                                          ),
+                                    ),
                                   ],
                                 ),
+                              );
+                            }),
+                          ],
+                        ),
+                      ),
+                    ],
+                    if (_intervals.isNotEmpty) ...[
+                      const SizedBox(height: 32),
+                      Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 24),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text('RECENT', style: Theme.of(context).textTheme.titleSmall),
+                            const SizedBox(height: 12),
+                            ..._intervals.take(4).map((interval) {
+                              final from = _formatTime((interval['fromTsMs'] as num?)?.toInt());
+                              final to = _formatTime((interval['toTsMs'] as num?)?.toInt());
+                              final sot = (interval['sotHoursPer100'] as num?)?.toDouble();
+                              return Padding(
+                                padding: const EdgeInsets.only(bottom: 8),
+                                child: Row(
+                                  children: [
+                                    Expanded(
+                                      child: Text(
+                                        '$from–$to',
+                                        style: Theme.of(context).textTheme.bodyMedium,
+                                      ),
+                                    ),
+                                    Text(
+                                      _formatHours(sot),
+                                      style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                                            color: Colors.black,
+                                          ),
+                                    ),
+                                  ],
+                                ),
+                              );
+                            }),
+                          ],
+                        ),
+                      ),
+                    ],
+                    if (_error != null)
+                      Padding(
+                        padding: const EdgeInsets.fromLTRB(24, 12, 24, 0),
+                        child: Text(
+                          _error!,
+                          style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                                fontSize: 12,
+                                color: Colors.black54,
                               ),
+                        ),
+                      ),
+                    const Spacer(flex: 3),
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(24, 0, 24, 16),
+                      child: Column(
+                        children: [
+                          Text(
+                            updated.isEmpty ? '' : 'updated $updated',
+                            style: Theme.of(context).textTheme.bodyMedium?.copyWith(fontSize: 12),
+                          ),
+                          TextButton(
+                            onPressed: () => _refresh(force: true),
+                            child: const Text(
+                              'Refresh',
+                              style: TextStyle(fontSize: 12, color: Colors.black54),
                             ),
-                          );
-                        }),
+                          ),
+                        ],
                       ),
                     ),
                   ],
@@ -448,8 +452,9 @@ class _SetupPanel extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final notifications = setup['notificationsGranted'] == true;
-    final battery = setup['batteryUnrestricted'] == true;
+    final installed = setup['installed'] == true;
+    final running = setup['running'] == true;
+    final permission = setup['permissionGranted'] == true;
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -457,36 +462,25 @@ class _SetupPanel extends StatelessWidget {
         Text('SETUP', style: Theme.of(context).textTheme.titleSmall),
         const SizedBox(height: 16),
         _SetupRow(
-          label: 'Notifications',
-          done: notifications,
-          onTap: () => onRequest('notifications'),
+          label: 'Shizuku installed',
+          done: installed,
+          action: 'Open',
+          onTap: () => onRequest('shizuku_open'),
         ),
         const SizedBox(height: 12),
         _SetupRow(
-          label: 'Unrestricted battery',
-          done: battery,
-          onTap: () => onRequest('battery_optimization'),
+          label: 'Shizuku running',
+          done: running,
+          action: 'Open',
+          onTap: () => onRequest('shizuku_open'),
         ),
         const SizedBox(height: 12),
         _SetupRow(
-          label: 'Autostart (ColorOS)',
-          done: setup['autostartAcknowledged'] == true,
-          onTap: () => onRequest('autostart'),
+          label: 'Shizuku permission',
+          done: permission,
+          action: 'Grant',
+          onTap: () => onRequest('shizuku_permission'),
         ),
-        if (setup['autostartAcknowledged'] != true) ...[
-          const SizedBox(height: 4),
-          TextButton(
-            onPressed: () => onRequest('autostart_ack'),
-            child: const Text('I enabled autostart'),
-          ),
-        ],
-        if (!battery) ...[
-          const SizedBox(height: 8),
-          TextButton(
-            onPressed: () => onRequest('battery_settings'),
-            child: const Text('Open app battery settings'),
-          ),
-        ],
         const SizedBox(height: 24),
         OutlinedButton(
           onPressed: onRefresh,
@@ -501,11 +495,13 @@ class _SetupRow extends StatelessWidget {
   const _SetupRow({
     required this.label,
     required this.done,
+    required this.action,
     required this.onTap,
   });
 
   final String label;
   final bool done;
+  final String action;
   final VoidCallback onTap;
 
   @override
@@ -530,9 +526,9 @@ class _SetupRow extends StatelessWidget {
             ),
           ),
           if (!done)
-            const Text(
-              'Grant',
-              style: TextStyle(fontSize: 12, color: Colors.black54),
+            Text(
+              action,
+              style: const TextStyle(fontSize: 12, color: Colors.black54),
             ),
         ],
       ),

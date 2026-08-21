@@ -6,18 +6,18 @@
     "configurations": [
     
         {
-            "name": "battery_stats",
+            "name": "edrc",
             "request": "launch",
             "type": "dart"
         },
         {
-            "name": "battery_stats (profile mode)",
+            "name": "edrc (profile mode)",
             "request": "launch",
             "type": "dart",
             "flutterMode": "profile"
         },
         {
-            "name": "battery_stats (release mode)",
+            "name": "edrc (release mode)",
             "request": "launch",
             "type": "dart",
             "flutterMode": "release"

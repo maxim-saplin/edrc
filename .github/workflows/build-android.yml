@@ -1,0 +1,112 @@
+name: Build Android
+
+on:
+  workflow_call:
+    inputs:
+      create-release:
+        description: Create GitHub release
+        required: false
+        type: boolean
+        default: false
+      release-tag:
+        description: Tag name for release
+        required: false
+        type: string
+    secrets:
+      STOREFILE:
+        required: true
+      STOREPASSWORD:
+        required: true
+      KEYPASSWORD:
+        required: true
+      KEYALIAS:
+        required: true
+
+jobs:
+  build:
+    name: Signed APK and AAB
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Extract version
+        id: extract_version
+        run: |
+          VERSION=$(sed -n 's/^version: *//p' pubspec.yaml)
+          echo "VERSION=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Decode keystore
+        env:
+          ENCODED_STRING: ${{ secrets.STOREFILE }}
+        run: |
+          echo "$ENCODED_STRING" | base64 -d > android/app/keystore.jks
+
+      - name: Create key.properties
+        env:
+          STORE_PASSWORD: ${{ secrets.STOREPASSWORD }}
+          KEY_PASSWORD: ${{ secrets.KEYPASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEYALIAS }}
+        run: |
+          echo "storePassword=$STORE_PASSWORD" > android/key.properties
+          echo "keyPassword=$KEY_PASSWORD" >> android/key.properties
+          echo "keyAlias=$KEY_ALIAS" >> android/key.properties
+          echo "storeFile=keystore.jks" >> android/key.properties
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: zulu
+          java-version: "17"
+          cache: gradle
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Get Dependencies
+        run: flutter pub get
+
+      - name: Analyze
+        run: flutter analyze
+
+      - name: Build APK
+        run: flutter build apk --release
+
+      - name: Build AAB
+        run: flutter build appbundle --release
+
+      - name: Rename artifacts
+        id: artifacts
+        env:
+          VERSION: ${{ steps.extract_version.outputs.VERSION }}
+        run: |
+          APK="build/app/outputs/flutter-apk/edrc-android-$VERSION.apk"
+          AAB="build/app/outputs/bundle/release/edrc-android-$VERSION.aab"
+          mv build/app/outputs/flutter-apk/app-release.apk "$APK"
+          mv build/app/outputs/bundle/release/app-release.aab "$AAB"
+          echo "apk-path=$APK" >> "$GITHUB_OUTPUT"
+          echo "aab-path=$AAB" >> "$GITHUB_OUTPUT"
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: edrc-android-${{ steps.extract_version.outputs.VERSION }}
+          path: |
+            ${{ steps.artifacts.outputs.apk-path }}
+            ${{ steps.artifacts.outputs.aab-path }}
+          retention-days: 14
+
+      - name: Create Release
+        if: inputs.create-release == true
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.release-tag }}
+          files: |
+            ${{ steps.artifacts.outputs.apk-path }}
+            ${{ steps.artifacts.outputs.aab-path }}
+          generate_release_notes: true
+          draft: true

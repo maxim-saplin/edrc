@@ -1,0 +1,47 @@
+name: Release
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  check-release:
+    name: Check Release
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.extract_version.outputs.VERSION }}
+      tag-name: ${{ steps.extract_version.outputs.TAG_NAME }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Extract version
+        id: extract_version
+        run: |
+          VERSION=$(sed -n 's/^version: *//p' pubspec.yaml)
+          echo "VERSION=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "TAG_NAME=v$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Check if release exists
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG_NAME: ${{ steps.extract_version.outputs.TAG_NAME }}
+        run: |
+          if gh release view "$TAG_NAME" > /dev/null 2>&1; then
+            echo "::error::Release $TAG_NAME already exists. Bump version in pubspec.yaml."
+            exit 1
+          fi
+
+  release:
+    name: Build and Release
+    needs: check-release
+    uses: ./.github/workflows/build-android.yml
+    with:
+      create-release: true
+      release-tag: ${{ needs.check-release.outputs.tag-name }}
+    secrets:
+      STOREFILE: ${{ secrets.STOREFILE }}
+      STOREPASSWORD: ${{ secrets.STOREPASSWORD }}
+      KEYPASSWORD: ${{ secrets.KEYPASSWORD }}
+      KEYALIAS: ${{ secrets.KEYALIAS }}

@@ -1,7 +1,7 @@
-name: battery_stats
-description: "Screen-on battery endurance sampling PoC."
+name: edrc
+description: "edrc — battery endurance"
 publish_to: 'none'
-version: 0.2.0
+version: 0.4.0+4
 
 environment:
   sdk: ^3.7.2

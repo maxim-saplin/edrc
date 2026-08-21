@@ -1,21 +1,28 @@
-package com.example.battery_stats
+package com.saplin.edrc
 
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.os.Build
-import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.EventChannel
 import io.flutter.plugin.common.MethodChannel
+import kotlin.concurrent.thread
 
 class MainActivity : FlutterActivity() {
-    private val channelName = "com.example.battery_stats/battery"
-    private lateinit var store: SampleStore
+    private val channelName = "com.saplin.edrc/battery"
     private var eventSink: EventChannel.EventSink? = null
+    private var shizukuSink: EventChannel.EventSink? = null
     private var eventsRegistered = false
+    private val mainHandler = Handler(Looper.getMainLooper())
+
+    private val shizukuStatusListener: (Map<String, Any>) -> Unit = { status ->
+        shizukuSink?.success(status)
+    }
 
     private val batteryReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
@@ -23,67 +30,41 @@ class MainActivity : FlutterActivity() {
         }
     }
 
-    override fun onCreate(savedInstanceState: Bundle?) {
-        super.onCreate(savedInstanceState)
-        store = SampleStore(this)
-    }
-
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
+        ShizukuHelper.init(this)
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, channelName)
             .setMethodCallHandler { call, result ->
                 when (call.method) {
                     "getSnapshot" -> result.success(snapshotMap())
-                    "getDayMetrics" -> {
-                        val todayKey = store.dateKeyFor(System.currentTimeMillis())
-                        val dayKeys = store.lastSevenDateKeys()
-                        val days = dayKeys.map { store.metricsForDateKey(it).toMap() }
-                        val week = store.metricsForLastSevenDays().toMap()
-                        result.success(
-                            mapOf(
-                                "todayKey" to todayKey,
-                                "days" to days,
-                                "week" to week,
-                            ),
-                        )
-                    }
-                    "getSetupStatus" -> result.success(SetupHelper.getSetupStatus(this))
+                    "getSetupStatus" -> result.success(ShizukuHelper.status(this))
                     "requestSetup" -> {
                         when (call.argument<String>("type")) {
-                            "notifications" -> {
-                                SetupHelper.requestNotificationPermission(this)
+                            "shizuku_open" -> {
+                                ShizukuHelper.openShizuku(this)
                                 result.success(true)
                             }
-                            "battery_optimization" -> {
-                                SetupHelper.requestBatteryUnrestricted(this)
-                                result.success(true)
-                            }
-                            "battery_settings" -> {
-                                SetupHelper.openBatterySettings(this)
-                                result.success(true)
-                            }
-                            "autostart" -> {
-                                SetupHelper.openAutostartSettings(this)
-                                result.success(true)
-                            }
-                            "autostart_ack" -> {
-                                SetupHelper.acknowledgeAutostart(this)
-                                result.success(true)
-                            }
-                            "notification_channel" -> {
-                                SetupHelper.openSamplingNotificationSettings(this)
+                            "shizuku_permission" -> {
+                                ShizukuHelper.requestPermission()
                                 result.success(true)
                             }
                             else -> result.error("INVALID", "Unknown setup type", null)
                         }
                     }
-                    "startCollector" -> {
-                        if (!CollectorStarter.isReady(this)) {
-                            result.success(false)
-                            return@setMethodCallHandler
+                    "getMetrics" -> {
+                        thread {
+                            try {
+                                val payload = BatterystatsRepository.metrics(
+                                    this,
+                                    force = call.argument<Boolean>("force") == true,
+                                )
+                                mainHandler.post { result.success(payload) }
+                            } catch (e: Exception) {
+                                mainHandler.post {
+                                    result.error("DUMP", e.message, null)
+                                }
+                            }
                         }
-                        CollectorStarter.startIfReady(this)
-                        result.success(BatterySampleService.isRunning)
                     }
                     else -> result.notImplemented()
                 }
@@ -104,25 +85,45 @@ class MainActivity : FlutterActivity() {
                     }
                 },
             )
+
+        EventChannel(flutterEngine.dartExecutor.binaryMessenger, "$channelName/shizuku")
+            .setStreamHandler(
+                object : EventChannel.StreamHandler {
+                    override fun onListen(arguments: Any?, events: EventChannel.EventSink?) {
+                        shizukuSink = events
+                        ShizukuHelper.addStatusListener(shizukuStatusListener)
+                    }
+
+                    override fun onCancel(arguments: Any?) {
+                        ShizukuHelper.removeStatusListener(shizukuStatusListener)
+                        shizukuSink = null
+                    }
+                },
+            )
+    }
+
+    override fun onResume() {
+        super.onResume()
+        ShizukuHelper.maybeAskPermission()
+        shizukuSink?.success(ShizukuHelper.status(this))
     }
 
     override fun onDestroy() {
+        ShizukuHelper.removeStatusListener(shizukuStatusListener)
         unregisterBatteryEvents()
         eventSink = null
+        shizukuSink = null
         super.onDestroy()
     }
 
     private fun snapshotMap(): Map<String, Any> {
         val live = BatteryProbe.read(this)
-        val lastLog = store.latestSample()
         return mapOf(
             "level" to (live?.level ?: -1),
             "plugged" to (live?.plugged ?: false),
             "charging" to (live?.charging ?: false),
             "screenOn" to (live?.screenOn ?: false),
             "timestampMs" to (live?.timestampMs ?: 0L),
-            "lastLogTimestampMs" to (lastLog?.timestampMs ?: 0L),
-            "collectorRunning" to BatterySampleService.isRunning,
         )
     }
 
