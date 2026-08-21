@@ -1,26 +1,26 @@
 # edrc
 
-Battery endurance. Screen-on (and idle) hours a full charge would last, from Android’s own timers (`dumpsys batterystats --charged` via Shizuku).
+How long a full charge would last, from Android’s own on-battery timers (`dumpsys batterystats --charged` via Shizuku).
 
-SOT = screen-on hours ÷ (screen-on mAh / pack capacity). Shown only if screen-on discharge is ≥ 3% of the pack.
+Screen-on hours ÷ (screen-on mAh / pack). Shown if on-battery screen-on drain is ≥ 3% of the pack. Tap the big number for the same thing while idle (screen off).
 
-Example: 3.2 h on-screen while 1498 mAh drained on-screen of a 5600 mAh pack → **~12 h** per full charge.
+Example: 3.2 h screen on, 1498 mAh of a 5600 mAh pack → **~12 h** per full charge.
 
 ## What it shows
 
-- **This cycle** — `Screen on`, `Screen on discharge`, `Start clock time`.
-- **Last cycle** — only if a dump saw `Start clock time` change. Otherwise **not caught**.
-- **Frames** — hourly (and on open) snapshots of those same totals. Interval SOT only when Δ mAh ≥ 100.
+- **Live %** and charging / unplugged.
+- **Hours per full charge** — screen on (or idle). Need more drain until the 3% gate.
+- **This cycle** — hours actually used on battery since Android’s last full-charge reset. Those clocks do not move while plugged in.
+- **PREVIOUS** — earlier cycles, only if a dump saw `Start clock time` change.
+- **RECENT** — interval estimates, only when a stretch drained ≥ 100 mAh.
 
-No calendar days. ColorOS `--daily` 1% screen tags are not used.
+No calendar days.
 
 ## How it collects
 
-Shizuku UserService (`:dump`, daemon). No app foreground service, no extra notification. One dumpsys of the since-last-charge header, at most every 2 minutes on open, otherwise about once an hour. Frames live in `/data/local/tmp/com.saplin.edrc.frames.jsonl` (shell uid).
+Shizuku UserService (`:dump`, daemon). No app foreground service, no extra notification. Header dump on open (at most every 2 minutes) and about once an hour. Frames: `/data/local/tmp/com.saplin.edrc.frames.jsonl` (shell uid).
 
-Live `%` / charging is public `BatteryManager`.
-
-`Screen on` / idle clocks are **on battery only** — they do not move while plugged in. Wireless pad time is already excluded. Micro top-ups stay in the same cycle until Android resets after a full charge.
+Live % / charging is public `BatteryManager`. Wireless pad time is already excluded from the on-battery clocks. Micro top-ups stay in the same cycle until Android resets after a full charge.
 
 ## Setup
 
@@ -28,7 +28,7 @@ Shizuku installed, running, permission granted.
 
 ## Release
 
-Local (needs `android/key.properties` pointing at `saplin.jks`, alias `edrc`):
+Local (`android/key.properties` → `saplin.jks`, alias `edrc`):
 
 ```bash
 flutter build apk --release
