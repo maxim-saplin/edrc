@@ -36,6 +36,6 @@ jobs:
         run: flutter analyze
 
       - name: Android unit tests
-        env:
-          JAVA_HOME: ${{ env.JAVA_HOME }}
-        run: cd android && ./gradlew :app:testDebugUnitTest
+        run: |
+          flutter build apk --config-only
+          cd android && ./gradlew :app:testDebugUnitTest
