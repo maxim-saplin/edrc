@@ -18,9 +18,18 @@ No calendar days.
 
 ## How it collects
 
-Shizuku UserService (`:dump`, daemon). No app foreground service, no extra notification. Header dump on open (at most every 2 minutes) and about once an hour. Frames: `/data/local/tmp/com.saplin.edrc.frames.jsonl` (shell uid).
+Two processes, one APK. No extra binary, no Shizuku cron, no app foreground service, no notification.
 
-Live % / charging is public `BatteryManager`. Wireless pad time is already excluded from the on-battery clocks. Micro top-ups stay in the same cycle until Android resets after a full charge.
+1. **`com.saplin.edrc`** — Flutter UI, normal app uid. Reads live `%` / charging from public `BatteryManager`. Cannot run `dumpsys`.
+2. **`com.saplin.edrc:dump`** — `DumpService` (a Kotlin class in this APK). Shizuku starts it with `app_process` as uid **shell**, so it can run the system `dumpsys batterystats --charged`.
+
+**Start.** First open with Shizuku granted, the UI calls `bindUserService`. Shizuku forks `:dump` and constructs `DumpService`. `.daemon(true)` keeps that process after the UI unbinds or is swipe-killed.
+
+**While `:dump` is alive.** On start it takes one header dump, then an in-process `Handler` delay (~1 h) and repeats. Opening the app also asks it over AIDL (`collectFrame`); skipped if the last dump was < 2 min ago (10 s if you tap Refresh). Each dump appends a line to `/data/local/tmp/com.saplin.edrc.frames.jsonl` (shell uid). The UI only reads that process / file.
+
+**Stop.** `:dump` dies if Shizuku is stopped, the phone reboots, or the OEM kills that process. Nothing is registered to start it again until you open edrc. Minimizing or killing the UI does not stop it.
+
+Wireless pad time is already excluded from the on-battery clocks. Micro top-ups stay in the same cycle until Android resets after a full charge.
 
 ## Setup
 
