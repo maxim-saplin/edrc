@@ -57,7 +57,10 @@ data class DayMetrics(
     val screenOnHours: Double,
     val screenOnPercentDrop: Double,
     val totalUnpluggedPercentDrop: Double,
+    val drainMah: Double,
     val stepCount: Int,
+    val gapCount: Int,
+    val droppedGapHours: Double,
     val hasEnoughData: Boolean,
 ) {
     fun toMap(): Map<String, Any?> = mapOf(
@@ -66,7 +69,10 @@ data class DayMetrics(
         "screenOnHours" to screenOnHours,
         "screenOnPercentDrop" to screenOnPercentDrop,
         "totalUnpluggedPercentDrop" to totalUnpluggedPercentDrop,
+        "drainMah" to drainMah,
         "stepCount" to stepCount,
+        "gapCount" to gapCount,
+        "droppedGapHours" to droppedGapHours,
         "hasEnoughData" to hasEnoughData,
     )
 }
@@ -204,80 +210,78 @@ class SampleStore(private val context: Context) {
         return maxOf(estimates.maxOrNull() ?: DEFAULT_CAPACITY_UAH, DEFAULT_CAPACITY_UAH)
     }
 
+    private fun emptyMetrics(label: String): DayMetrics {
+        return DayMetrics(
+            dateKey = label,
+            sotHoursPer100 = null,
+            screenOnHours = 0.0,
+            screenOnPercentDrop = 0.0,
+            totalUnpluggedPercentDrop = 0.0,
+            drainMah = 0.0,
+            stepCount = 0,
+            gapCount = 0,
+            droppedGapHours = 0.0,
+            hasEnoughData = false,
+        )
+    }
+
     private fun computeMetrics(samples: List<BatterySample>, label: String): DayMetrics {
-        if (samples.size < 2) {
-            return DayMetrics(
-                dateKey = label,
-                sotHoursPer100 = null,
-                screenOnHours = 0.0,
-                screenOnPercentDrop = 0.0,
-                totalUnpluggedPercentDrop = 0.0,
-                stepCount = 0,
-                hasEnoughData = false,
-            )
-        }
+        if (samples.size < 2) return emptyMetrics(label)
 
         val capacityUah = estimateCapacityUah(samples)
 
-        var anchorLevel: Int? = null
         var anchorChargeUah: Int? = null
         var lastTime: Long? = null
         var lastScreenOn = false
         var screenOnMsInStep = 0L
         var screenOffMsInStep = 0L
-        var flushedPercentInStep = 0.0
 
         var screenOnHoursTotal = 0.0
         var screenOnPercentTotal = 0.0
         var totalUnpluggedPercent = 0.0
+        var drainMah = 0.0
         var stepCount = 0
+        var gapCount = 0
+        var droppedGapMs = 0L
 
-        fun clearInterval() {
+        fun resetStepTracking(chargeUah: Int?) {
+            anchorChargeUah = chargeUah
             screenOnMsInStep = 0L
             screenOffMsInStep = 0L
-            flushedPercentInStep = 0.0
         }
 
-        fun resetStepTracking(level: Int, chargeUah: Int?) {
-            anchorLevel = level
-            anchorChargeUah = chargeUah
-            clearInterval()
-        }
-
-        fun creditDrop(percentDrop: Double) {
-            if (percentDrop <= 0) return
+        fun creditMah(dropUah: Int) {
+            if (dropUah < MIN_CHARGE_DROP_UAH) return
             val stepMs = screenOnMsInStep + screenOffMsInStep
             if (stepMs <= 0) return
+            val percentDrop = dropUah * 100.0 / capacityUah
             val screenOnFraction = screenOnMsInStep.toDouble() / stepMs.toDouble()
             screenOnHoursTotal += screenOnMsInStep / 3_600_000.0
             screenOnPercentTotal += percentDrop * screenOnFraction
             totalUnpluggedPercent += percentDrop
+            drainMah += dropUah / 1000.0
             stepCount++
             screenOnMsInStep = 0L
             screenOffMsInStep = 0L
         }
 
         fun isChargeIncrease(sample: BatterySample): Boolean {
-            val anchor = anchorLevel
-            val anchorCharge = anchorChargeUah
-            if (anchor != null && sample.level > anchor) return true
-            if (anchorCharge != null && sample.chargeCounterUah != null) {
-                return sample.chargeCounterUah > anchorCharge + CHARGE_NOISE_UAH
-            }
-            return false
+            val anchorCharge = anchorChargeUah ?: return false
+            val charge = sample.chargeCounterUah ?: return false
+            return charge > anchorCharge + CHARGE_NOISE_UAH
         }
 
         for (sample in samples) {
             val chargingNow = sample.charging || isChargeIncrease(sample)
             if (chargingNow) {
-                resetStepTracking(sample.level, sample.chargeCounterUah)
+                resetStepTracking(sample.chargeCounterUah)
                 lastTime = sample.timestampMs
                 lastScreenOn = sample.screenOn
                 continue
             }
 
-            if (anchorLevel == null) {
-                resetStepTracking(sample.level, sample.chargeCounterUah)
+            if (anchorChargeUah == null) {
+                resetStepTracking(sample.chargeCounterUah)
                 lastTime = sample.timestampMs
                 lastScreenOn = sample.screenOn
                 continue
@@ -286,6 +290,14 @@ class SampleStore(private val context: Context) {
             val prevTime = lastTime
             if (prevTime != null && sample.timestampMs > prevTime) {
                 val delta = sample.timestampMs - prevTime
+                if (delta > MAX_GAP_MS) {
+                    gapCount++
+                    droppedGapMs += delta
+                    resetStepTracking(sample.chargeCounterUah)
+                    lastTime = sample.timestampMs
+                    lastScreenOn = sample.screenOn
+                    continue
+                }
                 if (lastScreenOn) {
                     screenOnMsInStep += delta
                 } else {
@@ -293,25 +305,14 @@ class SampleStore(private val context: Context) {
                 }
             }
 
-            val anchorCharge = anchorChargeUah
             val charge = sample.chargeCounterUah
-            val anchor = anchorLevel
-            val levelDropped = anchor != null && sample.level <= anchor - 1
-            if (!levelDropped && anchorCharge != null && charge != null) {
+            val anchorCharge = anchorChargeUah
+            if (anchorCharge != null && charge != null) {
                 val chargeDrop = anchorCharge - charge
                 if (chargeDrop >= MIN_CHARGE_DROP_UAH) {
-                    val percentDrop = chargeDrop * 100.0 / capacityUah
-                    creditDrop(percentDrop)
-                    flushedPercentInStep += percentDrop
+                    creditMah(chargeDrop)
                     anchorChargeUah = charge
                 }
-            }
-
-            if (levelDropped && anchor != null) {
-                val raw = (anchor - sample.level).toDouble()
-                val remaining = (raw - flushedPercentInStep).coerceAtLeast(0.0)
-                creditDrop(remaining)
-                resetStepTracking(sample.level, sample.chargeCounterUah)
             }
 
             lastTime = sample.timestampMs
@@ -319,15 +320,10 @@ class SampleStore(private val context: Context) {
         }
 
         val last = samples.last()
-        if (!last.charging && anchorLevel != null && (screenOnMsInStep + screenOffMsInStep) > 0) {
-            val anchorCharge = anchorChargeUah
-            val charge = last.chargeCounterUah
-            if (anchorCharge != null && charge != null) {
-                val chargeDrop = anchorCharge - charge
-                if (chargeDrop >= MIN_CHARGE_DROP_UAH) {
-                    creditDrop(chargeDrop * 100.0 / capacityUah)
-                }
-            }
+        val endAnchor = anchorChargeUah
+        val endCharge = last.chargeCounterUah
+        if (!last.charging && endAnchor != null && endCharge != null) {
+            creditMah(endAnchor - endCharge)
         }
 
         val hasEnoughData = screenOnPercentTotal >= 3.0 && stepCount > 0
@@ -343,7 +339,10 @@ class SampleStore(private val context: Context) {
             screenOnHours = screenOnHoursTotal,
             screenOnPercentDrop = screenOnPercentTotal,
             totalUnpluggedPercentDrop = totalUnpluggedPercent,
+            drainMah = drainMah,
             stepCount = stepCount,
+            gapCount = gapCount,
+            droppedGapHours = droppedGapMs / 3_600_000.0,
             hasEnoughData = hasEnoughData,
         )
     }
@@ -353,5 +352,6 @@ class SampleStore(private val context: Context) {
         private const val MIN_CHARGE_DROP_UAH = 50_000
         private const val CHARGE_NOISE_UAH = 10_000
         private const val DEFAULT_CAPACITY_UAH = 5_600_000
+        private const val MAX_GAP_MS = 12 * 60 * 1000L
     }
 }

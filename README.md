@@ -47,9 +47,7 @@ Root is the same data with less ceremony.
 
 ### 3. Sampling (current PoC in this repo)
 
-Foreground service logs `%`, plug, charging, screen-on, and µAh after install. SOT per 100% appears after enough unplugged (or plugged-but-not-charging) screen-on drain (≥3%). ColorOS 80% charge-hold with USB attached is still sampled; charging sessions reset the drain step so they are not stitched into SOT.
-
-Setup requires notifications, unrestricted battery, and ColorOS **autostart**. Do not force-stop the app from Settings / recents — Android will not restart sampling until you open it again. Lock the task in recents if ColorOS offers that.
+Foreground service logs µAh + plug + screen-on. Drain for SOT is **µAh only** (status-bar `%` is display). Intervals longer than 12 minutes (collector killed) are holes — not billed as screen-on. SOT appears after ≥3% screen-on drain from µAh. ColorOS **autostart** is required. Do not force-stop / swipe from recents.
 
 Shizuku mining can be added later as a second data source.
 

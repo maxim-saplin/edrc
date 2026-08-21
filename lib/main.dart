@@ -180,10 +180,28 @@ class _EndurancePageState extends State<EndurancePage>
   String _formatSubtitle(Map<String, dynamic>? metrics) {
     if (metrics == null) return 'no data';
     final screenOn = (metrics['screenOnHours'] as num?)?.toDouble() ?? 0;
-    final pct = (metrics['screenOnPercentDrop'] as num?)?.toDouble() ?? 0;
+    final mah = (metrics['drainMah'] as num?)?.toDouble() ?? 0;
     final steps = metrics['stepCount'] as int? ?? 0;
-    if (steps == 0) return 'no steps yet';
-    return '${screenOn.toStringAsFixed(1)} h on · ${pct.toStringAsFixed(0)}% · $steps steps';
+    if (steps == 0) return 'no µAh drain steps yet';
+    return '${screenOn.toStringAsFixed(1)} h on · ${mah.toStringAsFixed(0)} mAh · $steps steps';
+  }
+
+  String _coverageNote(Map<String, dynamic>? metrics) {
+    if (metrics == null) return '';
+    final gaps = metrics['gapCount'] as int? ?? 0;
+    final gapH = (metrics['droppedGapHours'] as num?)?.toDouble() ?? 0;
+    if (gaps <= 0) return '';
+    return 'log has $gaps hole${gaps == 1 ? '' : 's'} (${gapH.toStringAsFixed(1)} h not counted)';
+  }
+
+  String _lastSampleAge() {
+    final ts = (_snapshot['lastLogTimestampMs'] as num?)?.toInt() ?? 0;
+    if (ts <= 0) return '';
+    final age = DateTime.now().difference(DateTime.fromMillisecondsSinceEpoch(ts));
+    if (age.inMinutes < 2) return 'last sample just now';
+    if (age.inHours < 1) return 'last sample ${age.inMinutes} min ago';
+    if (age.inHours < 48) return 'last sample ${age.inHours} h ago';
+    return 'last sample ${age.inDays} d ago';
   }
 
   String _dayLabel(String dateKey) {
@@ -279,7 +297,18 @@ class _EndurancePageState extends State<EndurancePage>
                             Padding(
                               padding: const EdgeInsets.only(top: 4),
                               child: Text(
-                                selectedSot == null ? 'need ≥3% screen-on drain' : '',
+                                selectedSot == null ? 'need ≥3% screen-on drain (µAh)' : '',
+                                style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                                      fontSize: 12,
+                                      color: Colors.black38,
+                                    ),
+                              ),
+                            ),
+                          if (_coverageNote(selected).isNotEmpty)
+                            Padding(
+                              padding: const EdgeInsets.only(top: 4),
+                              child: Text(
+                                _coverageNote(selected),
                                 style: Theme.of(context).textTheme.bodyMedium?.copyWith(
                                       fontSize: 12,
                                       color: Colors.black38,
@@ -306,6 +335,17 @@ class _EndurancePageState extends State<EndurancePage>
                             _formatSubtitle(_week),
                             style: Theme.of(context).textTheme.bodyMedium,
                           ),
+                          if (_coverageNote(_week).isNotEmpty)
+                            Padding(
+                              padding: const EdgeInsets.only(top: 4),
+                              child: Text(
+                                _coverageNote(_week),
+                                style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                                      fontSize: 12,
+                                      color: Colors.black38,
+                                    ),
+                              ),
+                            ),
                         ],
                       ),
                     ),
@@ -318,6 +358,7 @@ class _EndurancePageState extends State<EndurancePage>
                             [
                               if (collecting) 'collecting',
                               if (samplingPaused) 'sampling paused',
+                              if (_lastSampleAge().isNotEmpty) _lastSampleAge(),
                               if (_setup['batteryUnrestricted'] == true) 'unrestricted',
                               if (_setup['notificationsGranted'] == true) 'notifications',
                               if (_setup['autostartAcknowledged'] == true) 'autostart',

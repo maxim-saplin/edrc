@@ -114,12 +114,14 @@ class MainActivity : FlutterActivity() {
 
     private fun snapshotMap(): Map<String, Any> {
         val live = BatteryProbe.read(this)
+        val lastLog = store.latestSample()
         return mapOf(
             "level" to (live?.level ?: -1),
             "plugged" to (live?.plugged ?: false),
             "charging" to (live?.charging ?: false),
             "screenOn" to (live?.screenOn ?: false),
             "timestampMs" to (live?.timestampMs ?: 0L),
+            "lastLogTimestampMs" to (lastLog?.timestampMs ?: 0L),
             "collectorRunning" to BatterySampleService.isRunning,
         )
     }
