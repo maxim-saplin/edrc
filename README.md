@@ -18,7 +18,7 @@ No calendar days.
 
 ## How it collects
 
-Two processes, one APK. No extra binary, no Shizuku cron, no app foreground service, no notification.
+Two processes, one APK. No extra binary, no app foreground service, no notification.
 
 1. **`com.saplin.edrc`** — Flutter UI, normal app uid. Reads live `%` / charging from public `BatteryManager`. Cannot run `dumpsys`.
 2. **`com.saplin.edrc:dump`** — `DumpService` (a Kotlin class in this APK). Shizuku starts it with `app_process` as uid **shell**, so it can run the system `dumpsys batterystats --charged`.
